@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""Window Transparency - global Hyprland window opacity for the omarchy bar.
+
+One slider controls how transparent every window is. A settings page holds a
+toggle that keeps video players and web pages (browsers) fully opaque, plus a
+list of individually excluded apps that always stay fully opaque.
+
+Commands:
+  get                 print the persisted state as JSON
+  readback            print the state parsed from the live looknfeel.lua block
+                      (falls back to the state file, then to defaults)
+  set <json>          merge a partial state, persist it, rewrite the managed
+                      block and reload Hyprland
+  apply               rewrite the block from the current state and reload
+  clear               remove the managed block and reload (Omarchy defaults)
+  toggle              flip the ignore-video/web flag, persist and reload
+  exclude add <class>    add an app class to the exclusion list
+  exclude remove <class> remove an app class from the exclusion list
+  exclude list           print the exclusion list
+  running                list window classes of open windows (JSON)
+
+State:  ~/.local/state/omarchy/transparency.json
+Block:  ~/.config/hypr/looknfeel.lua between the BEGIN/END markers below.
+
+The managed block only ever touches its own markers, so it coexists with a
+hand-edited looknfeel.lua. Global opacity is applied through Omarchy's
+`default-opacity` tag (the same tag its own browser/game exclusions remove),
+so those exclusions keep working unless you turn the toggle off. Excluded
+apps are matched by window class (as a Hyprland regex, like other rules) and
+are removed from the tag so they render at full opacity.
+"""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+HOME = os.path.expanduser("~")
+STATE_PATH = os.path.join(HOME, ".local/state/omarchy/transparency.json")
+LOCK_PATH = os.path.join(HOME, ".local/state/omarchy/transparency.lock")
+LOOKNFEEL = os.path.join(HOME, ".config/hypr/looknfeel.lua")
+BACKUP = LOOKNFEEL + ".transparency.bak"
+
+BEGIN = ("-- BEGIN robbie.transparency (managed by the Window Transparency bar "
+         "panel \u2014 edits are overwritten; use the panel)")
+END = "-- END robbie.transparency"
+
+# Window classes kept fully opaque when the ignore checkbox is on. Matched by
+# Hyprland as POSIX/ECMAScript regexes against the window class, so the first
+# letter is repeated to cover the common capitalisations without relying on
+# inline (?i) flags (which Hyprland's regex engine does not support).
+BROWSER = (r"([Gg]oogle-[Cc]hrome|[Cc]hromium|[Bb]rave-browser|[Mm]icrosoft-edge"
+           r"|[Vv]ivaldi|[Hh]elium|[Ff]irefox|[Zz]en|[Ll]ibrewolf|[Qq]utebrowser"
+           r"|[Oo]pera|[Ff]alkon|[Ee]piphany)")
+VIDEO = (r"([Mm]pv|[Vv]lc|[Cc]elluloid|[Tt]otem|[Cc]lapper|[Ss]mplayer|[Mm]player"
+         r"|[Dd]ragon|[Pp]arole|org.gnome.Totem|com.github.rafostar.Clapper)")
+
+DEFAULT_STATE = {"version": 1, "opacity": 0.90, "ignoreVideoWeb": True,
+                 "excludedApps": []}
+
+
+def normalize_class(value):
+    """Trim an app class and drop characters that would break the Lua line."""
+    cls = str(value or "").strip().strip("'\"")
+    for ch in ('"', "\\"):
+        cls = cls.replace(ch, "")
+    return cls.strip()
+
+
+def sanitize_apps(value):
+    if not isinstance(value, list):
+        return []
+    apps = []
+    seen = set()
+    for item in value:
+        cls = normalize_class(item)
+        key = cls.lower()
+        if cls and key not in seen:
+            apps.append(cls)
+            seen.add(key)
+    return apps
+
+
+def acquire_lock():
+    try:
+        os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+    except OSError:
+        return None
+
+
+def clamp(value, lo, hi):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return lo
+    return max(lo, min(hi, v))
+
+
+def sanitize(state):
+    s = dict(DEFAULT_STATE)
+    if isinstance(state, dict):
+        s.update(state)
+    s["opacity"] = round(clamp(s.get("opacity", DEFAULT_STATE["opacity"]), 0.30, 1.0), 3)
+    s["ignoreVideoWeb"] = bool(s.get("ignoreVideoWeb", DEFAULT_STATE["ignoreVideoWeb"]))
+    s["excludedApps"] = sanitize_apps(s.get("excludedApps", []))
+    s["version"] = 1
+    return s
+
+
+def load_state():
+    try:
+        with open(STATE_PATH, encoding="utf-8") as fh:
+            return sanitize(json.load(fh))
+    except (OSError, ValueError):
+        return dict(DEFAULT_STATE)
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(STATE_PATH), prefix=".transparency.")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, STATE_PATH)
+
+
+def load_text(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def atomic_write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".looknfeel.")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def fmt(value):
+    s = f"{float(value):.3f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
+def gen_block(state):
+    v = fmt(state["opacity"])
+    lines = [
+        BEGIN,
+        f'o.window({{ tag = "default-opacity" }}, {{ opacity = "{v} {v}" }})',
+    ]
+    if state["ignoreVideoWeb"]:
+        lines.append(f'o.window({{ class = "{BROWSER}" }}, '
+                     '{ tag = "-default-opacity", opacity = "1 1" })')
+        lines.append(f'o.window({{ class = "{VIDEO}" }}, '
+                     '{ tag = "-default-opacity", opacity = "1 1" })')
+    else:
+        lines.append(f'o.window({{ class = "{BROWSER}" }}, {{ opacity = "{v} {v}" }})')
+        lines.append(f'o.window({{ class = "{VIDEO}" }}, {{ opacity = "{v} {v}" }})')
+    for cls in state.get("excludedApps", []):
+        lines.append(f'o.window({{ class = "{cls}" }}, '
+                     '{ tag = "-default-opacity", opacity = "1 1" })')
+    lines.append(END)
+    return "\n".join(lines)
+
+
+def split_managed(text):
+    if BEGIN not in text or END not in text:
+        return None
+    pre = text.split(BEGIN, 1)[0]
+    inner = text.split(BEGIN, 1)[1].split(END, 1)[0]
+    post = text.split(END, 1)[1]
+    return pre, inner, post
+
+
+def write_block(state):
+    text = load_text(LOOKNFEEL)
+    if text.strip():
+        atomic_write(BACKUP, text)
+    block = gen_block(state)
+    parts = split_managed(text)
+    if parts:
+        new_text = parts[0].rstrip() + "\n\n" + block + "\n" + parts[2].lstrip("\n")
+    else:
+        base = text.rstrip()
+        new_text = (base + "\n\n" if base else "") + block + "\n"
+    atomic_write(LOOKNFEEL, new_text)
+
+
+def parse_block(text):
+    parts = split_managed(text)
+    if not parts:
+        return None
+    inner = parts[1]
+    state = dict(DEFAULT_STATE)
+    m = re.search(r'tag\s*=\s*"default-opacity"\s*\}\s*,\s*\{\s*opacity\s*=\s*"([0-9.]+)', inner)
+    if m:
+        state["opacity"] = float(m.group(1))
+    state["ignoreVideoWeb"] = '"-default-opacity"' in inner
+    return sanitize(state)
+
+
+def readback():
+    text = load_text(LOOKNFEEL)
+    state = load_state()
+    parsed = parse_block(text)
+    if parsed is not None:
+        state["opacity"] = parsed["opacity"]
+        state["ignoreVideoWeb"] = parsed["ignoreVideoWeb"]
+    return sanitize(state)
+
+
+def reload_hypr():
+    try:
+        subprocess.run(["hyprctl", "reload"], capture_output=True, text=True, timeout=8)
+    except Exception:
+        pass
+
+
+def ok(state):
+    print(json.dumps({"ok": True, "state": state}))
+
+
+def err(message):
+    print(json.dumps({"ok": False, "error": message}))
+    return 1
+
+
+def cmd_get():
+    ok(load_state())
+    return 0
+
+
+def cmd_readback():
+    ok(readback())
+    return 0
+
+
+def cmd_set(payload):
+    try:
+        patch = json.loads(payload or "{}")
+    except ValueError as e:
+        return err(f"invalid JSON: {e}")
+    if not isinstance(patch, dict):
+        return err("payload must be a JSON object")
+    state = load_state()
+    state.update(patch)
+    state = sanitize(state)
+    save_state(state)
+    write_block(state)
+    reload_hypr()
+    ok(state)
+    return 0
+
+
+def cmd_exclude(action, arg):
+    state = load_state()
+    if action == "list":
+        print(json.dumps({"ok": True, "apps": state["excludedApps"]}))
+        return 0
+    cls = normalize_class(arg)
+    if not cls:
+        return err("no app class given")
+    apps = state.get("excludedApps", [])
+    if action == "add":
+        apps = sanitize_apps(apps + [cls])
+    elif action == "remove":
+        apps = [a for a in apps if a.lower() != cls.lower()]
+    else:
+        return err(f"unknown exclude action {action}")
+    state["excludedApps"] = apps
+    state = sanitize(state)
+    save_state(state)
+    write_block(state)
+    reload_hypr()
+    ok(state)
+    return 0
+
+
+def cmd_running():
+    classes = []
+    try:
+        out = subprocess.run(["hyprctl", "clients", "-j"],
+                             capture_output=True, text=True, timeout=5).stdout
+        clients = json.loads(out) if out.strip() else []
+        classes = sorted({c.get("class", "") for c in clients
+                          if isinstance(c, dict) and c.get("class")})
+    except Exception:
+        classes = []
+    print(json.dumps({"ok": True, "classes": classes}))
+    return 0
+
+
+def cmd_apply():
+    state = load_state()
+    write_block(state)
+    reload_hypr()
+    ok(state)
+    return 0
+
+
+def cmd_clear():
+    text = load_text(LOOKNFEEL)
+    parts = split_managed(text)
+    if parts:
+        atomic_write(BACKUP, text)
+        new_text = parts[0].rstrip()
+        if parts[2].strip():
+            new_text += "\n" + parts[2].lstrip("\n")
+        else:
+            new_text += "\n"
+        atomic_write(LOOKNFEEL, new_text)
+        reload_hypr()
+    ok(load_state())
+    return 0
+
+
+def cmd_toggle():
+    return cmd_set(json.dumps({"ignoreVideoWeb": not load_state()["ignoreVideoWeb"]}))
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print(__doc__)
+        return 2
+    cmd = args[0]
+    payload = " ".join(args[1:])
+
+    def exclude_route():
+        tokens = payload.split(None, 1)
+        if not tokens:
+            return err("usage: exclude add|remove|list <class>")
+        return cmd_exclude(tokens[0], tokens[1] if len(tokens) > 1 else "")
+
+    _lock_fd = acquire_lock()
+    table = {
+        "get": cmd_get,
+        "readback": cmd_readback,
+        "set": lambda: cmd_set(payload),
+        "apply": cmd_apply,
+        "clear": cmd_clear,
+        "toggle": cmd_toggle,
+        "exclude": exclude_route,
+        "running": cmd_running,
+    }
+    if cmd not in table:
+        return err(f"unknown command {cmd}")
+    try:
+        return table[cmd]()
+    except OSError as e:
+        return err(f"os error: {e}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

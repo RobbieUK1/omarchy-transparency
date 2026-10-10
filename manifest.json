@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "robbie.transparency",
+  "name": "Window Transparency",
+  "version": "1.0.0",
+  "author": "robbie",
+  "license": "MIT",
+  "description": "A transparecy slider for every window, with an option to keep video players and web pages fully opaque.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Window Transparency",
+    "description": "Slide window opacity from the bar. A checkbox keeps browsers and video players fully opaque so video and web pages never go see-through.",
+    "category": "Appearance",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
