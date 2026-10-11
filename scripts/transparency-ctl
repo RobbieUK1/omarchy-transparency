@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Window Transparency - global Hyprland window opacity for the omarchy bar.
 
-One slider controls how transparent every window is. A settings page holds a
-toggle that keeps video players and web pages (browsers) fully opaque, plus a
-list of individually excluded apps that always stay fully opaque.
+One slider controls how transparent every window is, and the same value is
+applied to the shell's pop-down menus (bar plugin panels, tray menus, in-panel
+dropdowns and the Omarchy menu). A settings page holds a toggle that keeps
+video players and web pages (browsers) fully opaque, plus a list of
+individually excluded apps that always stay fully opaque.
 
 Commands:
   get                 print the persisted state as JSON
@@ -21,6 +23,7 @@ Commands:
 
 State:  ~/.local/state/omarchy/transparency.json
 Block:  ~/.config/hypr/looknfeel.lua between the BEGIN/END markers below.
+Shell:  ~/.config/omarchy/shell.toml between the BEGIN/END markers below.
 
 The managed block only ever touches its own markers, so it coexists with a
 hand-edited looknfeel.lua. Global opacity is applied through Omarchy's
@@ -28,6 +31,15 @@ hand-edited looknfeel.lua. Global opacity is applied through Omarchy's
 so those exclusions keep working unless you turn the toggle off. Excluded
 apps are matched by window class (as a Hyprland regex, like other rules) and
 are removed from the tag so they render at full opacity.
+
+Pop-down menus are not windows, so Hyprland rules cannot reach them: bar
+plugin panels, tray menus, in-panel dropdowns and the Omarchy menu are shell
+surfaces whose card colour comes from `~/.config/omarchy/shell.toml`. The same
+slider value is therefore also written there as `background-alpha` under
+`[popups]` (every bar flyout and dropdown) and `[menu]` (the Omarchy menu plus
+the clipboard and emoji pickers). The shell watches that file, so the change
+lands without a restart, and the keys are user overrides, so they survive
+theme switches.
 """
 from __future__ import annotations
 
@@ -44,10 +56,16 @@ STATE_PATH = os.path.join(HOME, ".local/state/omarchy/transparency.json")
 LOCK_PATH = os.path.join(HOME, ".local/state/omarchy/transparency.lock")
 LOOKNFEEL = os.path.join(HOME, ".config/hypr/looknfeel.lua")
 BACKUP = LOOKNFEEL + ".transparency.bak"
+SHELL_TOML = os.path.join(HOME, ".config/omarchy/shell.toml")
+SHELL_TOML_BACKUP = SHELL_TOML + ".transparency.bak"
 
 BEGIN = ("-- BEGIN robbie.transparency (managed by the Window Transparency bar "
          "panel \u2014 edits are overwritten; use the panel)")
 END = "-- END robbie.transparency"
+
+TOML_BEGIN = ("# BEGIN robbie.transparency (managed by the Window Transparency "
+              "bar panel \u2014 edits are overwritten; use the panel)")
+TOML_END = "# END robbie.transparency"
 
 # Window classes kept fully opaque when the ignore checkbox is on. Matched by
 # Hyprland as POSIX/ECMAScript regexes against the window class, so the first
@@ -173,27 +191,75 @@ def gen_block(state):
     return "\n".join(lines)
 
 
-def split_managed(text):
-    if BEGIN not in text or END not in text:
+def split_managed(text, begin=BEGIN, end=END):
+    if begin not in text or end not in text:
         return None
-    pre = text.split(BEGIN, 1)[0]
-    inner = text.split(BEGIN, 1)[1].split(END, 1)[0]
-    post = text.split(END, 1)[1]
+    pre = text.split(begin, 1)[0]
+    inner = text.split(begin, 1)[1].split(end, 1)[0]
+    post = text.split(end, 1)[1]
     return pre, inner, post
 
 
-def write_block(state):
-    text = load_text(LOOKNFEEL)
+def splice_block(path, backup, begin, end, block):
+    text = load_text(path)
     if text.strip():
-        atomic_write(BACKUP, text)
-    block = gen_block(state)
-    parts = split_managed(text)
+        atomic_write(backup, text)
+    parts = split_managed(text, begin, end)
     if parts:
         new_text = parts[0].rstrip() + "\n\n" + block + "\n" + parts[2].lstrip("\n")
     else:
         base = text.rstrip()
         new_text = (base + "\n\n" if base else "") + block + "\n"
-    atomic_write(LOOKNFEEL, new_text)
+    atomic_write(path, new_text)
+
+
+def write_block(state):
+    splice_block(LOOKNFEEL, BACKUP, BEGIN, END, gen_block(state))
+
+
+# Shell side: the same opacity as background-alpha for the surfaces the shell
+# paints itself. Written last in the file so it wins over any theme or user
+# [popups]/[menu] keys, and watched live by the shell, so no restart is needed.
+def gen_toml_block(state):
+    v = fmt(state["opacity"])
+    return "\n".join([
+        TOML_BEGIN,
+        "[popups]",
+        f"background-alpha = {v}",
+        "",
+        "[menu]",
+        f"background-alpha = {v}",
+        TOML_END,
+    ])
+
+
+def write_toml_block(state):
+    splice_block(SHELL_TOML, SHELL_TOML_BACKUP, TOML_BEGIN, TOML_END,
+                 gen_toml_block(state))
+
+
+def write_all(state):
+    write_block(state)
+    write_toml_block(state)
+
+
+def drop_block(path, begin, end):
+    """Remove the managed block; delete the file if nothing else is left."""
+    text = load_text(path)
+    parts = split_managed(text, begin, end)
+    if not parts:
+        return False
+    remainder = parts[0].rstrip()
+    tail = parts[2].lstrip("\n")
+    remainder += ("\n" + tail) if tail.strip() else "\n"
+    if not remainder.strip():
+        try:
+            os.remove(path)
+        except OSError:
+            atomic_write(path, "")
+    else:
+        atomic_write(path, remainder)
+    return True
 
 
 def parse_block(text):
@@ -209,6 +275,14 @@ def parse_block(text):
     return sanitize(state)
 
 
+def parse_toml_block(text):
+    parts = split_managed(text, TOML_BEGIN, TOML_END)
+    if not parts:
+        return None
+    m = re.search(r"background-alpha\s*=\s*([0-9.]+)", parts[1])
+    return float(m.group(1)) if m else None
+
+
 def readback():
     text = load_text(LOOKNFEEL)
     state = load_state()
@@ -216,6 +290,12 @@ def readback():
     if parsed is not None:
         state["opacity"] = parsed["opacity"]
         state["ignoreVideoWeb"] = parsed["ignoreVideoWeb"]
+    else:
+        # No Hyprland block (e.g. looknfeel.lua was reset by hand): the shell
+        # block is the only live source of the opacity left.
+        shell_opacity = parse_toml_block(load_text(SHELL_TOML))
+        if shell_opacity is not None:
+            state["opacity"] = shell_opacity
     return sanitize(state)
 
 
@@ -256,7 +336,7 @@ def cmd_set(payload):
     state.update(patch)
     state = sanitize(state)
     save_state(state)
-    write_block(state)
+    write_all(state)
     reload_hypr()
     ok(state)
     return 0
@@ -280,7 +360,7 @@ def cmd_exclude(action, arg):
     state["excludedApps"] = apps
     state = sanitize(state)
     save_state(state)
-    write_block(state)
+    write_all(state)
     reload_hypr()
     ok(state)
     return 0
@@ -302,7 +382,7 @@ def cmd_running():
 
 def cmd_apply():
     state = load_state()
-    write_block(state)
+    write_all(state)
     reload_hypr()
     ok(state)
     return 0
@@ -310,16 +390,14 @@ def cmd_apply():
 
 def cmd_clear():
     text = load_text(LOOKNFEEL)
-    parts = split_managed(text)
-    if parts:
+    if split_managed(text):
         atomic_write(BACKUP, text)
-        new_text = parts[0].rstrip()
-        if parts[2].strip():
-            new_text += "\n" + parts[2].lstrip("\n")
-        else:
-            new_text += "\n"
-        atomic_write(LOOKNFEEL, new_text)
+        drop_block(LOOKNFEEL, BEGIN, END)
         reload_hypr()
+    shell_text = load_text(SHELL_TOML)
+    if split_managed(shell_text, TOML_BEGIN, TOML_END):
+        atomic_write(SHELL_TOML_BACKUP, shell_text)
+        drop_block(SHELL_TOML, TOML_BEGIN, TOML_END)
     ok(load_state())
     return 0
 

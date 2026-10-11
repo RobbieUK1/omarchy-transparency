@@ -1,8 +1,9 @@
 # Window Transparency (`robbie.transparency`)
 
 A single slider for the [Omarchy](https://omarchy.org) bar that controls how
-transparent every window is, plus a checkbox that keeps **video players and web
-pages fully opaque** so video and web content never goes see-through.
+transparent every window is — and how transparent the shell's pop-down menus
+are — plus a checkbox that keeps **video players and web pages fully opaque**
+so video and web content never goes see-through.
 
 <img alt="sliders" src="">
 
@@ -13,6 +14,11 @@ pages fully opaque** so video and web content never goes see-through.
 - **OPACITY slider** — sets the active/inactive opacity applied to every normal
   window, from 30% (very transparent) to 100% (fully opaque). Applies on
   release, which is when the change is written and Hyprland is reloaded.
+- **Pop-down menus follow the same slider** — bar plugin panels, tray menus,
+  in-panel dropdowns and the Omarchy menu are shell surfaces rather than
+  windows, so Hyprland rules cannot reach them. They get the same value
+  instead through the shell's own popup/menu colour alpha (see
+  [What it writes](#what-it-writes)), which the shell picks up live.
 - **"Ignore video & web pages" checkbox** — when checked, browsers and video
   players are kept fully opaque. When unchecked, the slider applies to them
   too.
@@ -79,8 +85,32 @@ splice a **managed block** between these markers in
 ```
 
 Only that block is ever touched; a backup of the previous file is kept at
-`~/.config/hypr/looknfeel.lua.transparency.bak`. State (opacity + checkbox)
-lives in `~/.local/state/omarchy/transparency.json`.
+`~/.config/hypr/looknfeel.lua.transparency.bak`.
+
+The same value is also spliced between matching markers at the end of
+`~/.config/omarchy/shell.toml`, where the shell keeps the colour alpha of its
+own surfaces:
+
+```toml
+# BEGIN robbie.transparency (managed by the Window Transparency bar panel ...)
+[popups]
+background-alpha = 0.632
+
+[menu]
+background-alpha = 0.632
+# END robbie.transparency
+```
+
+`[popups]` covers every bar flyout — plugin pop-down panels, tray menus,
+in-panel dropdowns — and `[menu]` covers the Omarchy menu plus the clipboard
+and emoji pickers. Those keys are user overrides layered on top of the active
+theme, so they survive theme switches, and the shell watches the file, so a
+change lands without restarting it. Anything else the file contains (such as
+`[font] base-size`, written by `omarchy display text size`) is left alone, and
+a backup of the previous file is kept at
+`~/.config/omarchy/shell.toml.transparency.bak`.
+
+State (opacity + checkbox) lives in `~/.local/state/omarchy/transparency.json`.
 
 ## CLI
 
@@ -88,10 +118,10 @@ The panel is a front-end for `scripts/transparency-ctl`:
 
 ```
 transparency-ctl get                     # persisted state
-transparency-ctl readback                # state parsed from the live block
+transparency-ctl readback                # state parsed from the live blocks
 transparency-ctl set '<json>'            # merge, persist, rewrite, reload
 transparency-ctl apply                   # rewrite from state + reload
-transparency-ctl clear                   # remove the block + reload
+transparency-ctl clear                   # remove both blocks + reload
 transparency-ctl toggle                  # flip the checkbox + reload
 ```
 
@@ -104,7 +134,7 @@ transparency-ctl set '{"opacity":0.85,"ignoreVideoWeb":true}'
 Shell IPC (same panel open/close, plus the JSON surface):
 
 ```sh
-omarchy-shell transparency open
+omarchy-shell robbie.transparency open
 ```
 
 ## Notes
@@ -115,6 +145,10 @@ omarchy-shell transparency open
   appear to do nothing for non-browser apps. Use one or the other. If you are
   removing Glass, pick its **Stock** style first so its block is cleaned out of
   `looknfeel.lua`.
+- **What pop-downs are covered:** anything the shell paints with its popup or
+  menu surface colours (above). Surfaces with a colour of their own — the
+  volume/brightness OSD card, the lock screen, polkit prompts, notifications —
+  keep their theme alpha, and app-native menus belong to their app.
 - User space only: no elevated permissions, no daemon, no network access.
 - `python3` and `hyprctl` are already present on Omarchy.
 
@@ -137,7 +171,8 @@ The `exclude add|remove|list` and `running` commands are also available via the 
 
 - State: `~/.local/state/omarchy/transparency.json` (keys: `opacity`, `ignoreVideoWeb`, `excludedApps`, `version`)
 - Managed Hyprland block: `~/.config/hypr/looknfeel.lua` between `-- BEGIN robbie.transparency ...` and `-- END robbie.transparency` (edits there are overwritten)
-- Backup: `~/.config/hypr/looknfeel.lua.transparency.bak`
+- Managed shell block: `~/.config/omarchy/shell.toml` between `# BEGIN robbie.transparency ...` and `# END robbie.transparency` (`[popups]` and `[menu]` `background-alpha`)
+- Backups: `~/.config/hypr/looknfeel.lua.transparency.bak` and `~/.config/omarchy/shell.toml.transparency.bak`
 - IPC target: `robbie.transparency`
 
 ## Tips

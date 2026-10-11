@@ -133,7 +133,7 @@ Panel {
       PanelHero {
         width: parent.width
         title: "Window Transparency"
-        meta: root.excludeMedia ? "Media & web pages kept opaque" : "Applied to all windows"
+        meta: root.excludeMedia ? "Media & web pages kept opaque" : "Windows & pop-down menus"
         foreground: Color.popups.text
         fontFamily: root.fontFamily
         iconComponent: Component {

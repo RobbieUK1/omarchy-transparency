@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "robbie.transparency",
   "name": "Window Transparency",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "robbie",
   "license": "MIT",
-  "description": "A transparecy slider for every window, with an option to keep video players and web pages fully opaque.",
+  "description": "A transparency slider for every window and the shell's pop-down menus, with an option to keep video players and web pages fully opaque.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Window Transparency",
-    "description": "Slide window opacity from the bar. A checkbox keeps browsers and video players fully opaque so video and web pages never go see-through.",
+    "description": "Slide window and pop-down menu opacity from the bar. A checkbox keeps browsers and video players fully opaque so video and web pages never go see-through.",
     "category": "Appearance",
     "allowMultiple": false,
     "defaultSection": "right"
